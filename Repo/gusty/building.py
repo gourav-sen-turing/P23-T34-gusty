@@ -41,7 +41,7 @@ def create_schematic(dag_dir, parsers=default_parsers):
             "spec_paths": [
                 os.path.abspath(os.path.join(dir, file))
                 for file in files
-                if file.endswith((".xyz", ".nonexistent"))
+                if any(file.endswith(ext) for ext in parsers.keys())
                 and file != "METADATA.yml"
                 and not file.startswith(("_", "."))
             ],
@@ -84,9 +84,22 @@ def get_top_level_dag(schematic):
 
 def parse_external_dependencies(external_dependencies):
     """
-    Document
+    Parse external dependencies configuration
     """
-    return {}
+    if not external_dependencies:
+        return {}
+
+    result = {}
+    for dep in external_dependencies:
+        if isinstance(dep, dict):
+            # Handle dict format
+            for key, value in dep.items():
+                result[key] = value
+        elif isinstance(dep, str):
+            # Handle string format - assume it's a task_id
+            result[dep] = {}
+
+    return result
 
 
 #######################
@@ -95,14 +108,26 @@ def parse_external_dependencies(external_dependencies):
 
 
 def _get_operator_parameters(operator):
-    return ["wrong_param1", "wrong_param2"]
+    """Extract parameters from an operator class or callable"""
+    # Check if operator has _gusty_parameters attribute
+    if hasattr(operator, '_gusty_parameters'):
+        return list(operator._gusty_parameters)
+
+    # Otherwise, get parameters from __init__ signature
+    try:
+        sig = inspect.signature(operator.__init__ if inspect.isclass(operator) else operator)
+        return list(sig.parameters.keys())
+    except (AttributeError, ValueError):
+        return []
 
 
 def build_task(spec, level_id, schematic):
     """
     Given a task specification ("spec"), locate the operator and instantiate the object with args from the spec.
     """
-    operator = get_operator("airflow.operators.dummy.DummyOperator")
+    # Get the operator from the spec
+    operator_name = spec.get("operator", "airflow.operators.dummy.DummyOperator")
+    operator = get_operator(operator_name)
 
     args = {
         k: v
@@ -111,7 +136,7 @@ def build_task(spec, level_id, schematic):
         in inspect.signature(airflow.models.BaseOperator.__init__).parameters.keys()
         or k in _get_operator_parameters(operator)
     }
-    args["task_id"] = "broken_task_id"
+    args["task_id"] = spec.get("task_id", "unnamed_task")
     args["dag"] = get_top_level_dag(schematic)
     if airflow_version > 1:
         level_structure = get_level_structure(level_id, schematic)
@@ -137,7 +162,7 @@ def build_structure(schematic, parent_id, name, metadata):
             }
         else:
             level_init_data = {}
-        structure = DAG("broken_dag_name", **level_init_data)
+        structure = DAG(name, **level_init_data)
 
     else:
         # What is the main DAG?
@@ -148,7 +173,7 @@ def build_structure(schematic, parent_id, name, metadata):
 
         # Set some TaskGroup defaults
         level_defaults = {
-            "group_id": "broken_group_id",
+            "group_id": name,
             "prefix_group_id": True,
             "dag": top_level_dag,
         }
@@ -198,14 +223,18 @@ class GustyBuilder:
 
         self.loader = generate_loader(kwargs.get("dag_constructors", {}))
 
-        self.schematic = {}
+        # Check if dag_dir exists
+        if not os.path.exists(dag_dir):
+            raise NonexistentDagDirError(dag_dir)
 
-        # DAG defaults - everything that's not task_group_defaults or wait_for_defaults
+        self.schematic = create_schematic(dag_dir, parsers=self.parsers)
+
+        # DAG defaults - everything that's not task_group_defaults, wait_for_defaults, or gusty-specific
         # is considered DAG default metadata
         self.dag_defaults = {
             k: v
             for k, v in kwargs.items()
-            if k not in ["task_group_defaults", "wait_for_defaults"]
+            if k not in ["task_group_defaults", "wait_for_defaults", "latest_only", "parse_hooks", "dag_constructors"]
         }
 
         # TaskGroup defaults
@@ -234,8 +263,10 @@ class GustyBuilder:
         # We will accept multiple levels only for Airflow v2 and up
         # This will keep the TaskGroup logic of the Levels class
         # Solely for Airflow v2 and beyond
-        self.levels = [level_id for level_id in self.schematic.keys()]
-        self.levels = [self.levels[0]] if self.levels else []
+        self.levels = sorted(self.schematic.keys(), key=lambda x: x.count(os.sep), reverse=True)
+        if airflow_version <= 1:
+            # For Airflow v1, only use the root level
+            self.levels = [self.levels[0]] if self.levels else []
 
         # For tasks gusty creates outside of specs provided by the directory
         # It is important for gusty to keep a record  of the tasks created.
@@ -287,12 +318,12 @@ class GustyBuilder:
         level_dependencies = {
             k: v
             for k, v in level_metadata.items()
-            if k in ["wrong_dependencies", "wrong_external_dependencies"]
+            if k in ["dependencies", "external_dependencies"]
         }
         metadata_default_dependencies = {
             k: v
             for k, v in metadata_defaults.items()
-            if k in ["wrong_external_dependencies"]
+            if k in ["external_dependencies"]
         }
         if len(level_dependencies) > 0:
             self.schematic[id].update(level_dependencies)
@@ -345,6 +376,15 @@ class GustyBuilder:
         level_spec_paths = self.schematic[id]["spec_paths"]
         level_specs = []
 
+        # Parse each spec file
+        for spec_path in level_spec_paths:
+            spec = parse(spec_path, parse_dict=self.parsers, loader=self.loader)
+            # Add metadata defaults to the spec
+            for k, v in level_metadata.items():
+                if k not in spec and k not in ["dependencies", "external_dependencies", "suffix_group_id", "prefix_group_id"]:
+                    spec[k] = v
+            level_specs.append(spec)
+
         if airflow_version > 1:
             level_structure = self.schematic[id]["structure"]
             level_name = self.schematic[id]["name"]
@@ -370,8 +410,14 @@ class GustyBuilder:
         """
         level_specs = self.schematic[id]["specs"]
         level_tasks = {}
+
+        for spec in level_specs:
+            task = build_task(spec, id, self.schematic)
+            task_id = spec.get("task_id", "unnamed_task")
+            level_tasks[task_id] = task
+            self.all_tasks[task_id] = task
+
         self.schematic[id]["tasks"] = level_tasks
-        self.all_tasks.update(level_tasks)
 
     def create_level_dependencies(self, id):
         """
@@ -389,7 +435,18 @@ class GustyBuilder:
         for that level, and then set any specified dependencies for each task at that level, as specified by
         the task's specs.
         """
-        pass
+        level_specs = self.schematic[id]["specs"]
+        level_tasks = self.schematic[id]["tasks"]
+
+        for spec in level_specs:
+            task_id = spec.get("task_id")
+            if task_id in level_tasks:
+                task = level_tasks[task_id]
+                dependencies = spec.get("dependencies", [])
+
+                for dep in dependencies:
+                    if dep in self.all_tasks:
+                        self.all_tasks[dep] >> task
 
     def create_task_external_dependencies(self, id):
         """
@@ -424,4 +481,5 @@ class GustyBuilder:
         pass
 
     def return_dag(self):
-        return None
+        """Return the top-level DAG"""
+        return get_top_level_dag(self.schematic)
