@@ -41,11 +41,11 @@ def create_dag(
         **kwargs
     )
 
-    [setup.create_tasks(level) for level in setup.levels]
     [setup.parse_metadata(level) for level in setup.levels]
     [setup.create_structure(level) for level in setup.levels]
     [setup.check_metadata(level) for level in setup.levels]
     [setup.read_specs(level) for level in setup.levels]
+    [setup.create_tasks(level) for level in setup.levels]
     [setup.create_level_dependencies(level) for level in setup.levels]
     [setup.create_task_dependencies(level) for level in setup.levels]
     [setup.create_task_external_dependencies(level) for level in setup.levels]

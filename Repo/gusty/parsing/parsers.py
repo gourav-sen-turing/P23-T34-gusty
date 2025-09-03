@@ -18,20 +18,40 @@ def frontmatter_load(file_path, loader=None):
     if loader is None:
         loader = yaml.SafeLoader
 
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except (IOError, UnicodeDecodeError):
+        return {"metadata": {}, "content": ""}
+
+    # Handle empty files
+    if not content:
+        return {"metadata": {}, "content": ""}
 
     # Check if file starts with frontmatter delimiter
     if content.strip().startswith('---'):
+        # Split by --- to extract frontmatter
         parts = content.split('---', 2)
         if len(parts) >= 3:
-            # Extract metadata and content
+            # parts[0] should be empty or whitespace
+            # parts[1] is the YAML metadata
+            # parts[2] is the content
             metadata_yaml = parts[1].strip()
-            metadata = yaml.load(metadata_yaml, Loader=loader)
-            file_content = parts[2].strip()
+            if metadata_yaml:
+                try:
+                    metadata = yaml.load(metadata_yaml, Loader=loader)
+                    if metadata is None:
+                        metadata = {}
+                except yaml.YAMLError:
+                    metadata = {}
+            else:
+                metadata = {}
+
+            file_content = parts[2].lstrip('\n')  # Remove leading newlines from content
             return {"metadata": metadata, "content": file_content}
 
-    # If no frontmatter, try to load the whole file as YAML
+    # No frontmatter delimiters found - try to parse the whole file as YAML
+    # This is for pure YAML files
     try:
         metadata = yaml.load(content, Loader=loader)
         if isinstance(metadata, dict):
@@ -53,14 +73,17 @@ def parse_generic(file_path, loader=None):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             yaml_content = f.read()
+
+        # Parse the YAML content
         yaml_spec = yaml.load(yaml_content, Loader=loader)
+
+        # Ensure we return a dictionary
         if isinstance(yaml_spec, dict):
             return yaml_spec
-    except (yaml.YAMLError, IOError):
-        pass
-
-    # If loading failed or result is not a dict, return empty dict
-    return {}
+        else:
+            return {}
+    except (yaml.YAMLError, IOError, UnicodeDecodeError):
+        return {}
 
 
 def parse_py(file_path, loader=None):
@@ -82,10 +105,13 @@ def parse_py(file_path, loader=None):
     }
 
     # Try to extract frontmatter if available
-    result = frontmatter_load(file_path, loader=loader)
-    if result["metadata"]:
-        # Update spec with any metadata found
-        spec.update(result["metadata"])
+    try:
+        result = frontmatter_load(file_path, loader=loader)
+        if result.get("metadata"):
+            # Update spec with any metadata found
+            spec.update(result["metadata"])
+    except Exception:
+        pass  # Keep defaults if parsing fails
 
     return spec
 
@@ -99,33 +125,36 @@ def parse_ipynb(file_path, loader=None):
         loader = generate_loader()
 
     try:
-        nb = nbformat.read(file_path, as_version=4)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            nb = nbformat.read(f, as_version=4)
 
         # Look for YAML in markdown cells
-        yaml_content = None
         for cell in nb.cells:
             if cell.cell_type == 'markdown':
                 source = cell.source
 
                 # Check for code block with yaml
                 if '```yaml' in source:
-                    yaml_blocks = source.split('```yaml')
-                    if len(yaml_blocks) > 1:
-                        yaml_content = yaml_blocks[1].split('```')[0].strip()
-                        break
+                    # Extract YAML from code block
+                    yaml_start = source.find('```yaml') + 7
+                    yaml_end = source.find('```', yaml_start)
+                    if yaml_end > yaml_start:
+                        yaml_content = source[yaml_start:yaml_end].strip()
+                        if yaml_content:
+                            spec = yaml.load(yaml_content, Loader=loader)
+                            if isinstance(spec, dict):
+                                return spec
 
                 # Check for frontmatter style
                 elif source.strip().startswith('---'):
                     parts = source.split('---', 2)
                     if len(parts) >= 3:
                         yaml_content = parts[1].strip()
-                        break
-
-        if yaml_content:
-            spec = yaml.load(yaml_content, Loader=loader)
-            if isinstance(spec, dict):
-                return spec
-    except (yaml.YAMLError, IOError, nbformat.reader.NotJSONError):
+                        if yaml_content:
+                            spec = yaml.load(yaml_content, Loader=loader)
+                            if isinstance(spec, dict):
+                                return spec
+    except (yaml.YAMLError, IOError, nbformat.reader.NotJSONError, UnicodeDecodeError, KeyError):
         pass
 
     # Default return if no valid YAML found
@@ -141,14 +170,17 @@ def parse_sql(file_path, loader=None):
     if loader is None:
         loader = generate_loader()
 
-    result = frontmatter_load(file_path, loader=loader)
+    try:
+        result = frontmatter_load(file_path, loader=loader)
 
-    spec = {}
-    if result["metadata"]:
-        spec.update(result["metadata"])
+        spec = {}
+        if result.get("metadata"):
+            spec.update(result["metadata"])
 
-    # Add SQL content to spec
-    if result["content"]:
-        spec["sql"] = result["content"]
+        # Add SQL content to spec if present
+        if result.get("content"):
+            spec["sql"] = result["content"]
 
-    return spec
+        return spec
+    except Exception:
+        return {}

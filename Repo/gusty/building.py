@@ -29,19 +29,21 @@ def create_schematic(dag_dir, parsers=default_parsers):
     """
     Given a dag directory, identify requirements (e.g spec_paths, metadata) for each "level" of the DAG.
     """
+    # Get all valid file extensions from parsers
+    valid_extensions = tuple(parsers.keys())
+
     return {
         # Each entry is a "level" of the main DAG
         os.path.abspath(dir): {
             "name": os.path.basename(dir),
             "parent_id": os.path.abspath(os.path.dirname(dir))
-            if os.path.basename(os.path.dirname(dir))
-            != os.path.basename(os.path.dirname(dag_dir))
+            if os.path.abspath(os.path.dirname(dir)) != os.path.abspath(os.path.dirname(dag_dir))
             else None,
             "structure": None,
             "spec_paths": [
                 os.path.abspath(os.path.join(dir, file))
                 for file in files
-                if file.endswith((".xyz", ".nonexistent"))
+                if file.endswith(valid_extensions)
                 and file != "METADATA.yml"
                 and not file.startswith(("_", "."))
             ],
@@ -52,15 +54,13 @@ def create_schematic(dag_dir, parsers=default_parsers):
             "metadata": {},
             "tasks": {},
             "dependencies": []
-            if os.path.basename(os.path.dirname(dir))
-            != os.path.basename(os.path.dirname(dag_dir))
+            if os.path.abspath(os.path.dirname(dir)) != os.path.abspath(os.path.dirname(dag_dir))
             else None,
             "external_dependencies": [],
         }
         for dir, subdirs, files in os.walk(dag_dir)
         if not os.path.basename(dir).startswith(("_", "."))
     }
-
 
 def get_level_structure(level_id, schematic):
     """
@@ -84,9 +84,22 @@ def get_top_level_dag(schematic):
 
 def parse_external_dependencies(external_dependencies):
     """
-    Document
+    Parse external dependencies specification into a dictionary.
+    External dependencies can be specified as:
+    - A list of dag names
+    - A dictionary mapping dag names to task names
     """
-    return {}
+    if not external_dependencies:
+        return {}
+
+    if isinstance(external_dependencies, list):
+        # List of DAG names - default to depending on entire DAG
+        return {dag: None for dag in external_dependencies}
+    elif isinstance(external_dependencies, dict):
+        return external_dependencies
+    else:
+        # Single DAG name as string
+        return {external_dependencies: None}
 
 
 #######################
@@ -95,29 +108,49 @@ def parse_external_dependencies(external_dependencies):
 
 
 def _get_operator_parameters(operator):
-    return ["wrong_param1", "wrong_param2"]
+    """
+    Get the list of valid parameters for an operator class.
+    """
+    if hasattr(operator, '__init__'):
+        sig = inspect.signature(operator.__init__)
+        # Get all parameters except 'self'
+        params = [p for p in sig.parameters.keys() if p != 'self']
+        return params
+    return []
 
 
 def build_task(spec, level_id, schematic):
     """
     Given a task specification ("spec"), locate the operator and instantiate the object with args from the spec.
     """
-    operator = get_operator("airflow.operators.dummy.DummyOperator")
+    # Get the operator class
+    operator_name = spec.get("operator", "airflow.operators.dummy.DummyOperator")
+    operator = get_operator(operator_name)
 
+    # Get valid parameters for both BaseOperator and the specific operator
+    base_params = inspect.signature(airflow.models.BaseOperator.__init__).parameters.keys()
+    operator_params = _get_operator_parameters(operator)
+
+    # Filter spec to only include valid parameters
     args = {
         k: v
         for k, v in spec.items()
-        if k
-        in inspect.signature(airflow.models.BaseOperator.__init__).parameters.keys()
-        or k in _get_operator_parameters(operator)
+        if k in base_params or k in operator_params
     }
-    args["task_id"] = "broken_task_id"
+
+    # Ensure task_id is set
+    args["task_id"] = spec.get("task_id", "unnamed_task")
+
+    # Set the DAG
     args["dag"] = get_top_level_dag(schematic)
+
+    # Handle TaskGroup for Airflow 2+
     if airflow_version > 1:
         level_structure = get_level_structure(level_id, schematic)
         if isinstance(level_structure, TaskGroup):
             args["task_group"] = level_structure
 
+    # Create the task
     task = operator(**args)
 
     return task
@@ -133,11 +166,14 @@ def build_structure(schematic, parent_id, name, metadata):
             level_init_data = {
                 k: v
                 for k, v in metadata.items()
-                if k not in inspect.signature(DAG.__init__).parameters.keys()
+                if k in inspect.signature(DAG.__init__).parameters.keys()
             }
         else:
             level_init_data = {}
-        structure = DAG("broken_dag_name", **level_init_data)
+
+        # Use the name from metadata or the directory name
+        dag_id = metadata.get("dag_id", name) if metadata else name
+        structure = DAG(dag_id, **level_init_data)
 
     else:
         # What is the main DAG?
@@ -198,7 +234,12 @@ class GustyBuilder:
 
         self.loader = generate_loader(kwargs.get("dag_constructors", {}))
 
-        self.schematic = {}
+        # Check if dag_dir exists
+        if not os.path.exists(dag_dir):
+            raise NonexistentDagDirError(f"The directory {dag_dir} does not exist.")
+
+        # Create the schematic from the dag directory
+        self.schematic = create_schematic(dag_dir, self.parsers)
 
         # DAG defaults - everything that's not task_group_defaults or wait_for_defaults
         # is considered DAG default metadata
@@ -341,9 +382,17 @@ class GustyBuilder:
         """
         For a given level id, parse all of that level's yaml specs, given paths to those files.
         """
+        from gusty.parsing import parse
+
         level_metadata = self.schematic[id]["metadata"]
         level_spec_paths = self.schematic[id]["spec_paths"]
         level_specs = []
+
+        # Parse each spec file
+        for spec_path in level_spec_paths:
+            spec = parse(spec_path, parse_dict=self.parsers, loader=self.loader)
+            if spec:
+                level_specs.append(spec)
 
         if airflow_version > 1:
             level_structure = self.schematic[id]["structure"]
@@ -370,6 +419,14 @@ class GustyBuilder:
         """
         level_specs = self.schematic[id]["specs"]
         level_tasks = {}
+
+        # Create each task from its spec
+        for spec in level_specs:
+            task_id = spec.get("task_id")
+            if task_id:
+                task = build_task(spec, id, self.schematic)
+                level_tasks[task_id] = task
+
         self.schematic[id]["tasks"] = level_tasks
         self.all_tasks.update(level_tasks)
 
@@ -424,4 +481,7 @@ class GustyBuilder:
         pass
 
     def return_dag(self):
-        return None
+        """
+        Return the top-level DAG from the schematic
+        """
+        return get_top_level_dag(self.schematic)

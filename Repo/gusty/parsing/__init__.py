@@ -9,7 +9,6 @@ default_parsers = {
     ".py": parse_py,
     ".ipynb": parse_ipynb,
     ".sql": parse_sql,
-    # Add any other extensions that should be supported
     ".Rmd": parse_generic,
     ".txt": parse_generic,
 }
@@ -24,20 +23,20 @@ def parse(file_path, parse_dict=default_parsers, loader=None):
 
     path, extension = os.path.splitext(file_path)
 
-    # Get base filename without path or extension for task_id
+    # Get the task_id from the filename (without extension)
     task_id = os.path.basename(path)
 
-    # Select parser based on extension
+    # Select the appropriate parser based on file extension
     parser = parse_dict.get(extension, parse_generic)
 
-    # Call appropriate parser
+    # Call the parser with loader if it accepts it
     if "loader" in inspect.signature(parser).parameters.keys():
         yaml_file = parser(file_path, loader=loader)
     else:
         yaml_file = parser(file_path)
 
     # Ensure yaml_file is a dictionary
-    if yaml_file is None or not isinstance(yaml_file, dict):
+    if not isinstance(yaml_file, dict):
         yaml_file = {}
 
     # gusty always supplies a task_id and a file_path in a spec
