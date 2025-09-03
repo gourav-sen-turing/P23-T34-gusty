@@ -216,3 +216,57 @@ So feel free to give the gusty approach a try, because you don't have to commit 
 ## Containerized Demo
 
 As an additional resource, you can check out a containerized demo of gusty and Airflow over at the [gusty-demo repo](https://github.com/chriscardillo/gusty-demo), which illustrates how gusty and a few custom operators can make SQL queries, Jupyter notebooks, and RMarkdown documents all work together in the same data pipeline.
+
+# Turn 1: Model B response
+
+## Understanding of Requirements
+
+Based on my analysis, the project uses YAML frontmatter in various file types (.yml, .sql, .ipynb, .Rmd) to define Airflow task configurations. The key requirements are:
+
+1. **Frontmatter Parsing**: The system needs to parse YAML frontmatter from various file types:
+- `.yml` files: Pure YAML files (no frontmatter delimiters needed)
+- `.sql` files: SQL queries with YAML frontmatter between `---` delimiters
+- `.ipynb` files: Jupyter notebooks with YAML in a markdown cell
+- `.Rmd` files: R Markdown files with YAML frontmatter
+
+2. **Custom YAML Constructors**: The system supports custom YAML tags like:
+- `!days_ago`: Maps to `airflow.utils.dates.days_ago`
+- `!timedelta`: Maps to `datetime.timedelta`
+- `!datetime`: Maps to `datetime.datetime`
+- Custom constructors defined by users (e.g., `!custom_days_ago`, `!custom_retries`)
+
+3. **Current Implementation Issues**:
+- The `frontmatter_load` function currently returns dummy data
+- The `generate_loader` function has wrong tag names
+- The parsing functions don't actually parse the files
+- Helper functions in loaders.py are not implemented
+
+## Proposed Approach
+
+I will implement a custom frontmatter parsing solution that:
+
+1. **Replace `frontmatter_load` function**: Implement a function that:
+- Detects and extracts YAML frontmatter from files
+- Uses a custom YAML loader with registered constructors
+- Returns a dictionary with `metadata` and `content` keys
+
+2. **Fix `generate_loader` function**:
+- Correct the YAML tag names (remove "wrong_" prefixes)
+- Properly register custom constructors with the SafeLoader
+- Support both built-in and user-defined constructors
+
+3. **Implement parsing functions**:
+- `parse_generic`: For pure YAML files
+- `parse_sql`: For SQL files with frontmatter
+- `parse_ipynb`: For Jupyter notebooks with YAML in markdown cells
+- `parse_py`: For Python files (checking for special cases)
+
+4. **Complete helper functions in loaders.py**:
+- `scalar_to_value`: Convert YAML scalar nodes to Python values
+- `node_converter`: Convert various YAML node types
+- `wrap_yaml`: Decorator to wrap functions for YAML constructor use
+
+5. **Fix the main `parse` function** in `__init__.py`:
+- Properly select the parser based on file extension
+- Extract task_id from filename
+- Return complete spec dictionary
