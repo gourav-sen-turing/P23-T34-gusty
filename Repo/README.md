@@ -216,3 +216,31 @@ So feel free to give the gusty approach a try, because you don't have to commit 
 ## Containerized Demo
 
 As an additional resource, you can check out a containerized demo of gusty and Airflow over at the [gusty-demo repo](https://github.com/chriscardillo/gusty-demo), which illustrates how gusty and a few custom operators can make SQL queries, Jupyter notebooks, and RMarkdown documents all work together in the same data pipeline.
+
+# Turn 1: Model A response
+
+Based on my analysis of the repository and the failing tests, I now understand what needs to be implemented. Here's my plan:
+
+1. We need to implement a custom `frontmatter_load` function in `gusty/parsing/parsers.py` that:
+- Reads a file and extracts YAML frontmatter surrounded by `---` delimiters
+- Uses the PyYAML library with custom constructors for special YAML tags
+- Returns a dictionary with the parsed metadata and content
+
+2. We need to update the existing parser implementations in `parsers.py` that currently return placeholder values to properly use our new frontmatter implementation.
+
+3. We need to fix the `parse` function in `gusty/parsing/__init__.py` that's currently returning an empty dictionary.
+
+Let me outline my proposed implementation approach:
+
+1. Create a custom `frontmatter_load` function that:
+- Reads a file and looks for content between `---` markers
+- Uses the YAML loader with custom constructors
+- Returns a dictionary with `metadata` and `content` keys
+
+2. Update the different parsers (generic, py, ipynb, and sql) to use this function
+
+3. Fix the `parse` function to use the appropriate parser for each file extension
+
+This approach will maintain the functionality that was previously provided by the `python-frontmatter` library while removing the dependency.
+
+Would you like me to proceed with implementing this solution?
